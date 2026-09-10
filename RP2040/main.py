@@ -354,6 +354,12 @@ while True:
                         "->",
                         rcvstate,
                     )
+                    # Restore the motion limits declared in animation.servos
+                    # before entering a different normal state. This prevents
+                    # temporary tuning from excited/silly/shock/etc. leaking
+                    # into the next expression.
+                    animation.reset_servo_motion_defaults()
+
                     animation.current_state = rcvstate
                     animation.new_state_flag = True
                 else:

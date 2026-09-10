@@ -215,9 +215,14 @@ def update_speaking_mouth(now, speaking_active):
 
     speaking_active = bool(speaking_active)
 
-    if speaking_active and not mouth_runtime_active:
+    # MOU is speech-owned. A normal state transition may restore every
+    # servo's declaration defaults, so while speech is active we re-assert
+    # the mouth-specific motion limits on every loop.
+    if speaking_active:
         servos["MOU"].max_speed = SPEAKING_MOUTH_MAX_SPEED
         servos["MOU"].max_accel = SPEAKING_MOUTH_MAX_ACCEL
+
+    if speaking_active and not mouth_runtime_active:
 
         mouth_open_phase = True
         _set_random_mouth_target()
@@ -390,6 +395,29 @@ servos = {
     "EAL": Servo(pin_num=2, max_speed=250, max_accel=200, min_angle=60, max_angle=150), # Left ear
     "EAR": Servo(pin_num=1, max_speed=500, max_accel=200, min_angle=30, max_angle=120), # Right ear
 }
+
+# ============================================================
+# Servo motion defaults
+#
+# The servos declaration above is the SINGLE source of truth for default
+# max_speed/max_accel values. Capture those values once at startup so a
+# state is free to tune motion temporarily without leaking that tuning into
+# the next state. Editing the Servo(...) values above automatically changes
+# the defaults used here; there is no second table to maintain.
+# ============================================================
+SERVO_MOTION_DEFAULTS = {
+    name: (servo.max_speed, servo.max_accel)
+    for name, servo in servos.items()
+}
+
+
+def reset_servo_motion_defaults():
+    """Restore every servo to the speed/acceleration it was declared with."""
+    for name, servo in servos.items():
+        default_speed, default_accel = SERVO_MOTION_DEFAULTS[name]
+        servo.max_speed = default_speed
+        servo.max_accel = default_accel
+
 
 def apply_pose(pose):
     pose = pose_map.get(pose, pose_calibrate)
