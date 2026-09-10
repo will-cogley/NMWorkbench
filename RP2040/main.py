@@ -19,11 +19,17 @@ rx_buffer = b""
 CALIBRATE_PIN = 20
 FACETRACK_TOGGLE_PIN = 21
 WIGGLE_PIN = 12
+FRONT_LED_PIN = 25
+
+calibrate_bool = False
+last_toggle = 0
+
 
 # V2 controls are active LOW.
 mode = Pin(CALIBRATE_PIN, Pin.IN, Pin.PULL_UP)
 facetrack_toggle = Pin(FACETRACK_TOGGLE_PIN, Pin.IN, Pin.PULL_UP)
 wiggle_button = Pin(WIGGLE_PIN, Pin.IN, Pin.PULL_UP)
+front_LED = Pin(25, Pin.OUT)
 
 FACETRACK_ON_LEVEL = 0
 facetrack_enabled_prev = None
@@ -324,15 +330,6 @@ while True:
             rcvstate = line.decode().strip()
             print("RX:", rcvstate)
 
-            # Explicit local body-part actions from Coglet MCP tools.
-            # These are NOT emotions/states: RP2040 keeps current_state intact
-            # and runs each action for exactly three cycles with higher
-            # priority than Speaking.
-            if rcvstate.startswith("action:"):
-                action_name = rcvstate[7:].strip()
-                animation.queue_mcp_action(action_name)
-                continue
-
             # Speech activity and expression are two separate dimensions.
             # "speaking" starts the mouth animation.
             # happy/sad only change expression and leave speech_active untouched.
@@ -363,14 +360,15 @@ while True:
                     print("same state ignored:", rcvstate)
 
     # Calibration retains absolute priority over every servo command.
+    # --- START TEMPORARY ANIMATION TEST OVERRIDE ---
     calibration_owns_servos = _update_calibration_wiggle(now)
 
-    if calibration_owns_servos:
-        # Calibration remains the absolute safety priority. Explicit MCP
-        # motion is cancelled rather than fighting the calibration controls.
-        if animation.has_mcp_action():
-            animation.cancel_mcp_actions()
 
+    if calibration_owns_servos:
+        if time.ticks_diff(now, last_toggle) >= 500:
+            calibrate_bool = not calibrate_bool   # flip the boolean
+            last_toggle = now
+        
         # Calibration also pauses new Grove Vision work.
         animation.update_blink(
             now,
@@ -384,49 +382,32 @@ while True:
         )
 
     else:
+        calibrate_bool = False
         # GP21 affects ONLY Grove Vision / face tracking.
         facetrack_enabled = _update_facetrack_toggle()
 
-        # Explicit MCP actions temporarily own ALL servo commands. This makes
-        # requests such as "move only the left ear" stay local even while the
-        # assistant is in Speaking state. The requested action itself moves
-        # only its target servo(s); all others were frozen on action start.
-        action_owns_servos = animation.update_mcp_action(now)
+        # XiaoZhi animations keep running whether Facetrack is ON or OFF.
+        animation.apply_state(animation.current_state)
 
-        if action_owns_servos:
-            animation.update_blink(
-                now,
-                animation.current_state,
-                enabled=False,
-            )
+        animation.update_blink(
+            now,
+            animation.current_state,
+            enabled=True,
+        )
 
-            eye_follower.update(
-                now,
-                animation.current_state,
-                enabled=False,
-            )
+        # When GP21 is OFF, vision.py pauses new Vision AI requests and
+        # performs no visual-follow servo writes.
+        eye_follower.update(
+            now,
+            animation.current_state,
+            enabled=facetrack_enabled,
+        )
 
-        else:
-            # XiaoZhi animations keep running whether Facetrack is ON or OFF.
-            animation.apply_state(animation.current_state)
-
-            animation.update_blink(
-                now,
-                animation.current_state,
-                enabled=True,
-            )
-
-            # When GP21 is OFF, vision.py pauses new Vision AI requests and
-            # performs no visual-follow servo writes.
-            eye_follower.update(
-                now,
-                animation.current_state,
-                enabled=facetrack_enabled,
-            )
-
-            # MOU is independent from current emotion.  Run this after all
-            # expression/vision updates so speech has final ownership of the mouth.
-            animation.update_speaking_mouth(now, speech_active)
+        # MOU is independent from current emotion.  Run this after all
+        # expression/vision updates so speech has final ownership of the mouth.
+        animation.update_speaking_mouth(now, speech_active)
+        
+    front_LED.value(calibrate_bool)
 
     # During wiggle, set_immediate() writes the PCA command directly.
     # Servo.update() remains safe because pos/target/vel are synchronized
@@ -435,3 +416,6 @@ while True:
         s.update(dt)
 
     time.sleep_ms(1)
+
+
+

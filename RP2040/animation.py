@@ -391,304 +391,6 @@ servos = {
     "EAR": Servo(pin_num=1, max_speed=500, max_accel=200, min_angle=30, max_angle=120), # Right ear
 }
 
-# ============================================================
-# Explicit MCP actions
-#
-# These actions are intentionally separate from current_state/emotions.
-# Each tool call performs exactly THREE complete cycles and temporarily owns
-# every servo command so Speaking / random blink / Vision cannot move a second
-# body part at the same time.
-#
-# Motion values are copied directly from the already-tested Speaking motion:
-#   ROL: 65 <-> 115, 520 ms cadence, existing 600/400 speed/accel
-#   ears: 70 <-> 115, 520 ms cadence, Speaking 300/700 speed/accel
-# Blink reuses the existing tested LID close/open angles.
-# ============================================================
-
-MCP_ACTION_REPEAT_COUNT = 3
-MCP_ACTION_INTERVAL_MS = SPEAKING_NECK_INTERVAL_MS
-MCP_BLINK_OPEN_HOLD_MS = 180
-
-MCP_ACTION_NAMES = (
-    "shake_head",
-    "blink",
-    "left_ear",
-    "right_ear",
-    "ears",
-)
-
-mcp_action_queue = []
-mcp_action_state = {
-    "active": False,
-    "name": None,
-    "phase_b": False,
-    "cycles": 0,
-    "last_step": time.ticks_ms(),
-    "final_wait": False,
-    "blink_phase": None,
-    "blink_restore": float(BLINK_DEFAULT_OPEN_ANGLE),
-    "saved_tuning": {},
-}
-
-
-def queue_mcp_action(action_name):
-    """Queue one explicit MCP action from ESP32 UART."""
-    if action_name not in MCP_ACTION_NAMES:
-        print("[MCP ACTION] unknown action:", action_name)
-        return False
-
-    # Keep a small queue so multiple sequential MCP calls are not lost if the
-    # ESP sends the next command before the previous three-cycle animation ends.
-    if len(mcp_action_queue) >= 8:
-        print("[MCP ACTION] queue full, drop:", action_name)
-        return False
-
-    mcp_action_queue.append(action_name)
-    print("[MCP ACTION] queued:", action_name)
-    return True
-
-
-def has_mcp_action():
-    return mcp_action_state["active"] or bool(mcp_action_queue)
-
-
-def cancel_mcp_actions():
-    """Calibration safety path: cancel active and queued MCP motion."""
-    global new_state_flag
-
-    if mcp_action_state["active"]:
-        _restore_mcp_action_tuning()
-
-    mcp_action_state["active"] = False
-    mcp_action_state["name"] = None
-    mcp_action_state["final_wait"] = False
-    mcp_action_state["blink_phase"] = None
-    mcp_action_queue[:] = []
-    new_state_flag = True
-
-
-def _freeze_all_servos():
-    """Stop every servo exactly where it is before a local MCP action."""
-    for servo in servos.values():
-        if servo.enabled:
-            servo.set_immediate(servo.pos)
-
-
-def _save_mcp_action_tuning(names):
-    saved = {}
-    for name in names:
-        servo = servos[name]
-        saved[name] = (
-            float(servo.max_speed),
-            float(servo.max_accel),
-        )
-    mcp_action_state["saved_tuning"] = saved
-
-
-def _restore_mcp_action_tuning():
-    for name, tuning in mcp_action_state["saved_tuning"].items():
-        servo = servos[name]
-        servo.max_speed = tuning[0]
-        servo.max_accel = tuning[1]
-    mcp_action_state["saved_tuning"] = {}
-
-
-def _start_mcp_action(action_name, now):
-    """Start one queued action. Called only when Calibration is not active."""
-    global new_state_flag
-
-    # If a random blink was in progress, end it before freezing the face.
-    if blink_state["active"]:
-        servos["LID"].set_immediate(blink_state["restore_angle"])
-        blink_state["active"] = False
-        _schedule_next_blink(now)
-
-    # Preserve the normal open angle before freezing LID for an explicit blink.
-    lid_target = float(servos["LID"].target)
-    if lid_target <= BLINK_CLOSED_ANGLE + 5:
-        blink_restore = float(BLINK_DEFAULT_OPEN_ANGLE)
-    else:
-        blink_restore = min(float(BLINK_DEFAULT_OPEN_ANGLE), lid_target)
-
-    _freeze_all_servos()
-
-    mcp_action_state["active"] = True
-    mcp_action_state["name"] = action_name
-    mcp_action_state["phase_b"] = False
-    mcp_action_state["cycles"] = 0
-    mcp_action_state["last_step"] = now
-    mcp_action_state["final_wait"] = False
-    mcp_action_state["blink_phase"] = None
-    mcp_action_state["blink_restore"] = blink_restore
-    mcp_action_state["saved_tuning"] = {}
-
-    if action_name == "shake_head":
-        _save_mcp_action_tuning(("ROL",))
-        # Speaking does not override ROL tuning; these are the Servo defaults
-        # used by Speaking on this project.
-        servos["ROL"].max_speed = 600.0
-        servos["ROL"].max_accel = 400.0
-        servos["ROL"].set_target(SPEAKING_NECK_LEFT)
-
-    elif action_name == "left_ear":
-        _save_mcp_action_tuning(("EAL",))
-        servos["EAL"].max_speed = SPEAKING_EAR_MAX_SPEED
-        servos["EAL"].max_accel = SPEAKING_EAR_MAX_ACCEL
-        servos["EAL"].set_target(EAR_ANGLE_A)
-
-    elif action_name == "right_ear":
-        _save_mcp_action_tuning(("EAR",))
-        servos["EAR"].max_speed = SPEAKING_EAR_MAX_SPEED
-        servos["EAR"].max_accel = SPEAKING_EAR_MAX_ACCEL
-        servos["EAR"].set_target(EAR_ANGLE_A)
-
-    elif action_name == "ears":
-        _save_mcp_action_tuning(("EAL", "EAR"))
-        servos["EAL"].max_speed = SPEAKING_EAR_MAX_SPEED
-        servos["EAR"].max_speed = SPEAKING_EAR_MAX_SPEED
-        servos["EAL"].max_accel = SPEAKING_EAR_MAX_ACCEL
-        servos["EAR"].max_accel = SPEAKING_EAR_MAX_ACCEL
-        # Same numeric command on the mirrored pair = opposite physical motion.
-        servos["EAL"].set_target(EAR_ANGLE_A)
-        servos["EAR"].set_target(EAR_ANGLE_A)
-
-    elif action_name == "blink":
-        # Reuse the existing blink geometry. Blink is intentionally immediate,
-        # matching trigger_blink()/update_blink() already used by this firmware.
-        servos["LID"].set_immediate(BLINK_CLOSED_ANGLE)
-        mcp_action_state["blink_phase"] = "closed"
-
-    # The current XiaoZhi state remains unchanged. It will be re-entered once
-    # the MCP action has fully finished.
-    new_state_flag = True
-    print("[MCP ACTION] START:", action_name, "x", MCP_ACTION_REPEAT_COUNT)
-
-
-def _movement_action_targets(action_name):
-    if action_name == "shake_head":
-        return ("ROL",)
-    if action_name == "left_ear":
-        return ("EAL",)
-    if action_name == "right_ear":
-        return ("EAR",)
-    if action_name == "ears":
-        return ("EAL", "EAR")
-    return ()
-
-
-def _movement_targets_settled(action_name):
-    names = _movement_action_targets(action_name)
-    if not names:
-        return True
-
-    for name in names:
-        servo = servos[name]
-        if abs(servo.target - servo.pos) > 1.0:
-            return False
-        if abs(servo.vel) > 2.0:
-            return False
-    return True
-
-
-def _finish_mcp_action():
-    global new_state_flag
-
-    name = mcp_action_state["name"]
-    _restore_mcp_action_tuning()
-    mcp_action_state["active"] = False
-    mcp_action_state["name"] = None
-    mcp_action_state["final_wait"] = False
-    mcp_action_state["blink_phase"] = None
-
-    # Re-enter whatever state the ESP last requested (usually Speaking).
-    new_state_flag = True
-    print("[MCP ACTION] DONE:", name)
-
-
-def _update_mcp_blink(now):
-    phase = mcp_action_state["blink_phase"]
-    elapsed = time.ticks_diff(now, mcp_action_state["last_step"])
-
-    if phase == "closed":
-        if elapsed < BLINK_DURATION_MS:
-            return
-
-        servos["LID"].set_immediate(mcp_action_state["blink_restore"])
-        mcp_action_state["cycles"] += 1
-        mcp_action_state["blink_phase"] = "open"
-        mcp_action_state["last_step"] = now
-        return
-
-    if phase == "open":
-        if elapsed < MCP_BLINK_OPEN_HOLD_MS:
-            return
-
-        if mcp_action_state["cycles"] >= MCP_ACTION_REPEAT_COUNT:
-            _finish_mcp_action()
-            return
-
-        servos["LID"].set_immediate(BLINK_CLOSED_ANGLE)
-        mcp_action_state["blink_phase"] = "closed"
-        mcp_action_state["last_step"] = now
-
-
-def _update_mcp_movement(now):
-    action_name = mcp_action_state["name"]
-
-    if mcp_action_state["final_wait"]:
-        if _movement_targets_settled(action_name):
-            _finish_mcp_action()
-        return
-
-    if time.ticks_diff(now, mcp_action_state["last_step"]) < MCP_ACTION_INTERVAL_MS:
-        return
-
-    mcp_action_state["phase_b"] = not mcp_action_state["phase_b"]
-    phase_b = mcp_action_state["phase_b"]
-
-    if action_name == "shake_head":
-        target = SPEAKING_NECK_RIGHT if phase_b else SPEAKING_NECK_LEFT
-        servos["ROL"].set_target(target)
-
-    else:
-        target = EAR_ANGLE_B if phase_b else EAR_ANGLE_A
-        if action_name in ("left_ear", "ears"):
-            servos["EAL"].set_target(target)
-        if action_name in ("right_ear", "ears"):
-            servos["EAR"].set_target(target)
-
-    mcp_action_state["last_step"] = now
-
-    # A complete cycle is A -> B -> A. Count only on the return to A.
-    if not phase_b:
-        mcp_action_state["cycles"] += 1
-        if mcp_action_state["cycles"] >= MCP_ACTION_REPEAT_COUNT:
-            mcp_action_state["final_wait"] = True
-
-
-def update_mcp_action(now):
-    """
-    Advance explicit MCP motion once.
-
-    Returns True while MCP owns the servos. main.py uses this to suppress
-    Speaking, random blink, Vision and the independent speaking-mouth writer.
-    """
-    if not mcp_action_state["active"]:
-        if not mcp_action_queue:
-            return False
-
-        action_name = mcp_action_queue.pop(0)
-        _start_mcp_action(action_name, now)
-
-    if mcp_action_state["name"] == "blink":
-        _update_mcp_blink(now)
-    else:
-        _update_mcp_movement(now)
-
-    # If one action ended and another is queued, retain ownership until the
-    # next loop starts it. This prevents Speaking from moving between actions.
-    return mcp_action_state["active"] or bool(mcp_action_queue)
-
 def apply_pose(pose):
     pose = pose_map.get(pose, pose_calibrate)
     for name, angle in pose.items():
@@ -793,6 +495,71 @@ pose_curious_2 = { # Each dictionary key = servo name, value = angle
     "EAR": 60,
 }
 
+pose_shock = { # Each dictionary key = servo name, value = angle
+#     "YAW": 90,
+#     "RWH": 90,
+    "ROL": 90,
+    "PIT": 10,
+    "MOU": 10,
+    "LID": 160,
+#     "EYL": 90,
+#     "EYR": 90,
+    "EAL": 30,
+    "EAR": 150,
+}
+
+pose_cool = { # Each dictionary key = servo name, value = angle
+#     "YAW": 90,
+#     "RWH": 90,
+    "ROL": 90,
+    "PIT": 10,
+    "MOU": 160,
+    "LID": 90,
+#     "EYL": 90,
+#     "EYR": 90,
+    "EAL": 150,
+    "EAR": 30,
+}
+
+pose_confident = { # Each dictionary key = servo name, value = angle
+#     "YAW": 90,
+#     "RWH": 90,
+    "ROL": 90,
+    "PIT": 10,
+    "MOU": 160,
+    "LID": 150,
+#     "EYL": 90,
+#     "EYR": 90,
+    "EAL": 30,
+    "EAR": 150,
+}
+
+pose_angry = { # Each dictionary key = servo name, value = angle
+#     "YAW": 90,
+#     "RWH": 90,
+    "ROL": 90,
+    "PIT": 80,
+    "MOU": 160,
+    "LID": 100,
+#     "EYL": 90,
+#     "EYR": 90,
+    "EAL": 30,
+    "EAR": 150,
+}
+
+pose_embarrassed = { # Each dictionary key = servo name, value = angle
+#     "YAW": 90,
+#     "RWH": 90,
+    "ROL": 90,
+    "PIT": 80,
+    "MOU": 160,
+    "LID": 90,
+#     "EYL": 90,
+#     "EYR": 90,
+    "EAL": 150,
+    "EAR": 30,
+}
+
 pose_map={
     "pose_calibrate": pose_calibrate,
     "pose_base": pose_base,
@@ -801,6 +568,11 @@ pose_map={
     "pose_sleep": pose_sleep,
     "pose_speaking": pose_speaking,
     "pose_stop_speaking": pose_stop_speaking,
+    "pose_shock": pose_shock,
+    "pose_cool": pose_cool,
+    "pose_confident": pose_confident,
+    "pose_angry": pose_angry,
+    "pose_embarrassed": pose_embarrassed
 }
 
 #_________________#  #_________________#
@@ -819,6 +591,50 @@ def state_sleep():
     global new_state_flag
     if new_state_flag == True:
         apply_pose("pose_sleep")
+        new_state_flag = False
+        
+def state_confused():
+    global new_state_flag
+    if new_state_flag == True:
+        apply_pose("pose_thinking_1")
+        new_state_flag = False
+        
+def state_cool():
+    global new_state_flag
+    if new_state_flag == True:
+        apply_pose("pose_cool")
+        new_state_flag = False
+        
+def state_confident():
+    global new_state_flag
+    if new_state_flag == True:
+        apply_pose("pose_confident")
+        new_state_flag = False
+        
+def state_embarrassed():
+    global new_state_flag
+    if new_state_flag == True:
+        apply_pose("pose_embarrassed")
+        new_state_flag = False    
+        
+def state_angry():
+    global new_state_flag
+    if new_state_flag == True:
+        apply_pose("pose_angry")
+        new_state_flag = False 
+        
+def state_shock():
+    global new_state_flag
+    if new_state_flag == True:
+        servos["EAL"].max_speed = 2000
+        servos["EAR"].max_speed = 2000
+        servos["MOU"].max_speed = 2000
+        
+        servos["EAL"].max_accel = 5000
+        servos["EAR"].max_accel = 5000
+        servos["MOU"].max_accel = 5000
+        
+        apply_pose("pose_shock")
         new_state_flag = False
         
 def state_speaking():
@@ -1021,7 +837,98 @@ def state_sad():
     servos["LID"].set_target(SAD_LID_ANGLE)
     servos["EAL"].set_target(SAD_LEFT_EAR_ANGLE)
     servos["EAR"].set_target(SAD_RIGHT_EAR_ANGLE)
+    
+def state_silly():
+    global new_state_flag, animation_bool_a, last_toggle_a, animation_bool_b, last_toggle_b
 
+    now = time.ticks_ms()
+
+    if new_state_flag == True:
+        # Start from the same baseline used by neutral.
+        apply_pose("pose_stop_speaking")
+        new_state_flag = False
+        servos["EAL"].max_speed = 2000
+        servos["EAR"].max_speed = 2000
+        servos["ROL"].max_speed = 500
+        
+        servos["EAL"].max_accel = 5000
+        servos["EAR"].max_accel = 5000
+        servos["ROL"].max_accel = 400
+
+    if animation_bool_a == False:
+        servos["EAL"].set_target(60)
+        servos["EAR"].set_target(60)
+    if animation_bool_a == True:
+        servos["EAL"].set_target(120)
+        servos["EAR"].set_target(120)
+    if time.ticks_diff(now, last_toggle_a) >= 500:
+        animation_bool_a = not animation_bool_a   # flip the boolean
+        last_toggle_a = now
+        
+    if animation_bool_b == False:
+        servos["ROL"].set_target(70)
+    if animation_bool_b == True:
+        servos["ROL"].set_target(110)
+    if time.ticks_diff(now, last_toggle_b) >= 750:
+        animation_bool_b = not animation_bool_b   # flip the boolean
+        last_toggle_b = now
+        
+
+
+def state_excited():
+    global new_state_flag, animation_bool_a, last_toggle_a, animation_bool_b, last_toggle_b
+
+    now = time.ticks_ms()
+
+    if new_state_flag == True:
+        # Start from the same baseline used by neutral.
+        apply_pose("pose_stop_speaking")
+        new_state_flag = False
+        servos["EAL"].max_speed = 2000
+        servos["EAR"].max_speed = 2000
+        servos["PIT"].max_speed = 500
+        
+        servos["EAL"].max_accel = 5000
+        servos["EAR"].max_accel = 5000
+        servos["PIT"].max_accel = 400
+
+    if animation_bool_a == False:
+        servos["EAL"].set_target(60)
+        servos["EAR"].set_target(60)
+    if animation_bool_a == True:
+        servos["EAL"].set_target(120)
+        servos["EAR"].set_target(120)
+    if time.ticks_diff(now, last_toggle_a) >= 250:
+        animation_bool_a = not animation_bool_a   # flip the boolean
+        last_toggle_a = now
+        
+    if animation_bool_b == False:
+        servos["PIT"].set_target(55)
+    if animation_bool_b == True:
+        servos["PIT"].set_target(30)
+    if time.ticks_diff(now, last_toggle_b) >= 500:
+        animation_bool_b = not animation_bool_b   # flip the boolean
+        last_toggle_b = now
+
+def state_sleepy():
+    global new_state_flag, animation_bool_a, last_toggle_a, animation_bool_b, last_toggle_b
+
+    now = time.ticks_ms()
+
+    if new_state_flag == True:
+        # Start from the same baseline used by neutral.
+        apply_pose("pose_cool")
+        new_state_flag = False
+        servos["ROL"].max_speed = 250
+        servos["ROL"].max_accel = 100
+
+    if animation_bool_a == False:
+        servos["ROL"].set_target(70)
+    if animation_bool_a == True:
+        servos["ROL"].set_target(110)
+    if time.ticks_diff(now, last_toggle_a) >= 1500:
+        animation_bool_a = not animation_bool_a   # flip the boolean
+        last_toggle_a = now
 
 def state_limber_up():
     now=time.ticks_ms()
@@ -1062,7 +969,7 @@ def state_limber_up():
 #   - listening
 #   - speaking
         
-state_map={  
+state_map={  #These emotion states mostly correspond to default "emojis" which XiaoZhi AI sends with its responses
     "neutral": state_neutral,
     "idle": state_sleep,
     "listening": state_listen,
@@ -1071,9 +978,26 @@ state_map={
     "speaking": state_speaking,
     "state_limber_up": state_limber_up,
     "happy": state_happy,
-    "sad": state_sad
+    "sad": state_sad,
+    "excited": state_excited,
+#     "winking": Coglet's eyelids are mechanically linked!
+    "cool": state_cool,
+    "relaxed": state_cool,
+#     "delicious": Not sure how this would look
+#     "kissy": Coglet is not your gf
+    "confident": state_confident,
+    "sleepy": state_sleepy,
+    "silly": state_silly,
+    "confused": state_confused,
+    "angry": state_angry,
+    "crying":state_sad,
+    "loving": state_happy,
+    "embarrassed": state_embarrassed,
+    "surprised":state_shock,
+    "shocked":state_shock
 }
 
 #_________________#  #_________________#            
+
 
 
