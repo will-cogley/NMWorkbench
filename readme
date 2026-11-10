@@ -1,1 +1,31 @@
-initial setup
+Please refer to the getting started guide for setup instructions. 
+
+Use the following release: https://github.com/will-cogley/NMWorkbench/releases/tag/v0.1.0
+
+If using a windows machine, follow these instructions to install Ubuntu:
+  Steps (Windows 11):
+
+  1. Open PowerShell as administrator and run:
+  
+      wsl --install -d Ubuntu-24.04
+  
+  Restart if asked, then open "Ubuntu" from the Start menu and create a user.
+  
+  2. So Coglet can reach the server, create the file C:\Users\<you>\.wslconfig with these two lines:
+  
+      [wsl2]
+      networkingMode=mirrored
+  
+  Then run "wsl --shutdown" in PowerShell and open Ubuntu again.
+  
+  3. Allow the device port in the Windows firewall (PowerShell as administrator):
+  
+      New-NetFirewallRule -DisplayName "NMRobotics" -Direction Inbound -Protocol TCP -LocalPort 18000 -Action Allow
+  
+  4. Inside Ubuntu, follow docs/GETTING_STARTED.md as written.
+  
+  One choice to make: you can install Ollama for Windows natively (simplest for the GPU) or install it inside Ubuntu. With mirrored networking, http://127.0.0.1:11434/v1 works either way. Just remember to set the context length to 16384 (OLLAMA_CONTEXT_LENGTH): as a Windows environment variable for the Windows app, or as described in the guide for Ubuntu.
+  
+  5. In the console, the OTA URL on the Overview page should show your PC's LAN IP (e.g. 192.168.x.x). Put that URL on Coglet.
+  
+  Dual boot (a separate Ubuntu partition) also works, and it's the most "native" setup. But it's more work and not necessary. Native Windows support for NMRobotics is planned, so later you won't need WSL at all.
